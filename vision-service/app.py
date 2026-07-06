@@ -4,7 +4,7 @@ import fitz
 import base64
 import easyocr
 import re
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 
 app = FastAPI()
@@ -58,7 +58,7 @@ def four_point_transform(image, pts):
 
 
 @app.post("/process-id")
-async def process_id(file: UploadFile = File(...)):
+async def process_id(file: UploadFile = File(...), points: str = Form(None)):
     try:
         contents = await file.read()
         
@@ -67,6 +67,7 @@ async def process_id(file: UploadFile = File(...)):
             # Load PDF from memory
             pdf_document = fitz.open(stream=contents, filetype="pdf")
             if pdf_document.page_count == 0:
+                from fastapi import Response
                 return Response(content="Empty PDF.", status_code=400)
             
             page = pdf_document[0]
@@ -88,75 +89,86 @@ async def process_id(file: UploadFile = File(...)):
             image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
         if image is None:
+            from fastapi import Response
             return Response(content="Invalid image format.", status_code=400)
             
         ratio = image.shape[0] / 800.0
         orig = image.copy()
-        dim = (int(image.shape[1] * (800.0 / image.shape[0])), 800)
-        resized = cv2.resize(image, dim)
-
-        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
         
-        # 1. Outer Boundary Optimization
-        # Gaussian blur to reduce noise
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # Canny edge detection (great for photos)
-        edged = cv2.Canny(blurred, 50, 150)
-        
-        # Inverse Binary Thresholding (great for white backgrounds like PDFs)
-        # Any non-white pixel becomes white (255).
-        _, thresh = cv2.threshold(blurred, 245, 255, cv2.THRESH_BINARY_INV)
-        
-        # Combine Canny edges and Threshold blob
-        combined = cv2.bitwise_or(edged, thresh)
-        
-        # Dilate to close the boundary into a solid contour
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        dilated = cv2.dilate(combined, kernel, iterations=3)
-
-        cnts, _ = cv2.findContours(dilated.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
-        screenCnt = None
-        
-        total_area = resized.shape[0] * resized.shape[1]
-
-        for c in cnts:
-            if cv2.contourArea(c) < (total_area * 0.05):
-                continue
-                
-            rect = cv2.minAreaRect(c)
-            (center, (width, height), angle) = rect
-            
-            if width == 0 or height == 0:
-                continue
-                
-            ar = width / float(height) if width > height else height / float(width)
-            
-            # Support both Physical IDs (1.2 to 1.9) AND Wide Digital Banners (2.2 to 3.5)
-            if (1.2 <= ar <= 1.9) or (2.2 <= ar <= 3.8):
-                box = cv2.boxPoints(rect)
-                screenCnt = np.int32(box)
-                break
-                
-        # Fallback 1: If no matching AR, take largest contour > 10%
-        if screenCnt is None and len(cnts) > 0:
-            if cv2.contourArea(cnts[0]) > (total_area * 0.10):
-                rect = cv2.minAreaRect(cnts[0])
-                box = cv2.boxPoints(rect)
-                screenCnt = np.int32(box)
-
-        # Fallback 2: If everything fails, use the whole image instead of slicing it blindly
-        if screenCnt is None:
-            h, w = orig.shape[:2]
-            pts = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype="float32")
-            warped = four_point_transform(orig, pts)
-        else:
-            # Scale coordinates back to the original image size
-            orig_pts = screenCnt * ratio
-            
-            # Perspective Warp (maintains natural aspect ratio)
+        if points:
+            print("Points used:", points)
+            import json
+            pts_data = json.loads(points)
+            orig_pts = np.array([[p["x"], p["y"]] for p in pts_data], dtype="float32")
             warped = four_point_transform(orig, orig_pts)
+        else:
+            print("No points provided! Falling back to auto-crop")
+            dim = (int(image.shape[1] * (800.0 / image.shape[0])), 800)
+            resized = cv2.resize(image, dim)
+
+            gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+            
+            # 1. Outer Boundary Optimization
+            # Gaussian blur to reduce noise
+            blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+            
+            # Canny edge detection (great for photos)
+            edged = cv2.Canny(blurred, 50, 150)
+            
+            # Inverse Binary Thresholding (great for white backgrounds like PDFs)
+            # Any non-white pixel becomes white (255).
+            _, thresh = cv2.threshold(blurred, 245, 255, cv2.THRESH_BINARY_INV)
+            
+            # Combine Canny edges and Threshold blob
+            combined = cv2.bitwise_or(edged, thresh)
+            
+            # Dilate to close the boundary into a solid contour
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            dilated = cv2.dilate(combined, kernel, iterations=3)
+
+            cnts, _ = cv2.findContours(dilated.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
+            screenCnt = None
+            
+            total_area = resized.shape[0] * resized.shape[1]
+
+            for c in cnts:
+                if cv2.contourArea(c) < (total_area * 0.05):
+                    continue
+                    
+                rect = cv2.minAreaRect(c)
+                (center, (width, height), angle) = rect
+                
+                if width == 0 or height == 0:
+                    continue
+                    
+                ar = width / float(height) if width > height else height / float(width)
+                
+                # Support both Physical IDs (1.2 to 1.9) AND Wide Digital Banners (2.2 to 3.5)
+                if (1.2 <= ar <= 1.9) or (2.2 <= ar <= 3.8):
+                    box = cv2.boxPoints(rect)
+                    screenCnt = np.int32(box)
+                    break
+                    
+            # Fallback 1: If no matching AR, take largest contour > 10%
+            if screenCnt is None and len(cnts) > 0:
+                if cv2.contourArea(cnts[0]) > (total_area * 0.10):
+                    rect = cv2.minAreaRect(cnts[0])
+                    box = cv2.boxPoints(rect)
+                    screenCnt = np.int32(box)
+
+            # Fallback 2: If everything fails, use the whole image instead of slicing it blindly
+            if screenCnt is None:
+                h, w = orig.shape[:2]
+                pts = np.array([[0, 0], [w, 0], [w, h], [0, h]], dtype="float32")
+                warped = four_point_transform(orig, pts)
+            else:
+                # Scale coordinates back to the original image size
+                orig_pts = screenCnt * ratio
+                
+                # Perspective Warp (maintains natural aspect ratio)
+                warped = four_point_transform(orig, orig_pts)
+            
             
             # Precision Edge Shaving 
             # We shave 2% uniformly to prevent overcropping while removing thin borders.
@@ -170,10 +182,9 @@ async def process_id(file: UploadFile = File(...)):
                 warped = warped[t_crop:h-b_crop, l_crop:w-r_crop]
 
         # 5. Perfect Photocopier Grayscale Effect
-        # Convert to grayscale and apply a very slight brightness boost to simulate a scanner.
-        # We completely remove the harsh unsharp mask so it looks perfectly smooth and realistic.
+        # Convert to grayscale and apply contrast boost to simulate a scanner.
         gray_warped = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
-        final_output = cv2.convertScaleAbs(gray_warped, alpha=1.0, beta=10)
+        final_output = cv2.convertScaleAbs(gray_warped, alpha=1.05, beta=10)
 
         # 6. Apply Perfect Transparent Rounded Corners
         # Convert to BGRA to support alpha transparency
@@ -190,11 +201,11 @@ async def process_id(file: UploadFile = File(...)):
         cv2.rectangle(alpha_mask, (r, 0), (w_out - r, h_out), 255, -1)
         cv2.rectangle(alpha_mask, (0, r), (w_out, h_out - r), 255, -1)
         
-        # Draw the 4 perfect circular corners
-        cv2.circle(alpha_mask, (r, r), r, 255, -1)
-        cv2.circle(alpha_mask, (w_out - r, r), r, 255, -1)
-        cv2.circle(alpha_mask, (r, h_out - r), r, 255, -1)
-        cv2.circle(alpha_mask, (w_out - r, h_out - r), r, 255, -1)
+        # Draw the 4 perfect circular corners with Anti-Aliasing for smooth edges
+        cv2.circle(alpha_mask, (r, r), r, 255, -1, cv2.LINE_AA)
+        cv2.circle(alpha_mask, (w_out - r, r), r, 255, -1, cv2.LINE_AA)
+        cv2.circle(alpha_mask, (r, h_out - r), r, 255, -1, cv2.LINE_AA)
+        cv2.circle(alpha_mask, (w_out - r, h_out - r), r, 255, -1, cv2.LINE_AA)
         
         # Apply mask to the alpha channel
         bgra[:, :, 3] = alpha_mask

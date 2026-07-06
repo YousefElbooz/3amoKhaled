@@ -30,20 +30,32 @@ if (!fs.existsSync(templatePath) && fs.existsSync(originalTemplatePath)) {
 }
 
 app.post('/api/generate-id-form', upload.array('idImages', 50), async (req, res) => {
-  try {
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: 'No files provided.' });
-    }
+    try {
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).json({ error: 'No files uploaded.' });
+        }
 
-    const processedPdfs = [];
+        const processedPdfs = [];
+        const pointsMap = req.body.pointsMap ? JSON.parse(req.body.pointsMap) : {};
 
-    for (let i = 0; i < req.files.length; i++) {
-        const file = req.files[i];
-        console.log(`Processing file ${i+1}/${req.files.length}:`, file.originalname);
+        for (let i = 0; i < req.files.length; i++) {
+            const file = req.files[i];
+            console.log(`Processing file ${i+1}/${req.files.length}:`, file.originalname);
+            
+            const filePoints = pointsMap[i];
+            if (filePoints) {
+                console.log(`Points received for file ${i}:`, filePoints);
+                fs.appendFileSync(path.join(__dirname, 'debug.log'), `[${new Date().toISOString()}] File: ${file.originalname}, Points: ${filePoints}\n`);
+            }
 
-        // 1. Send raw file to Python Microservice
-        const formData = new FormData();
-        formData.append('file', file.buffer, file.originalname);
+            // 1. Send raw file to Python Microservice
+            const formData = new FormData();
+            
+            if (filePoints) {
+                formData.append('points', filePoints);
+            }
+
+            formData.append('file', file.buffer, file.originalname);
 
         const pythonRes = await axios.post('http://127.0.0.1:8000/process-id', formData, {
           headers: formData.getHeaders(),
