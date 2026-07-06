@@ -1,0 +1,7 @@
+opencv-python
+numpy
+PyMuPDF
+easyocr
+fastapi
+uvicorn
+python-multipart
